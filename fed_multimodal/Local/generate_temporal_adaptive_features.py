@@ -4,15 +4,20 @@ from pathlib import Path
 
 import torch
 
-from fed_multimodal.poison_gan import PoisonDiscriminator, PoisonFeatureGenerator, PoisonGANConfig, FedPoisonGANTrainer
+from fed_multimodal.temporal_adaptive_gan import (
+    PoisonDiscriminator,
+    TemporalAdaptiveGANConfig,
+    TemporalAdaptiveGANTrainer,
+    TemporalAdaptivePoisonGenerator,
+)
 from fed_multimodal.poison_gan.kplus1 import build_kplus1_discriminator
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Generate synthetic UCF101 feature tensors for downstream training")
+    parser = argparse.ArgumentParser(description="Generate features with the temporal-adaptive GAN")
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--model_path", type=str, default="fed_multimodal/Local/results/local_training/best_model.pt")
-    parser.add_argument("--output_path", type=str, default="fed_multimodal/Local/results/poison_features/poison.pt")
+    parser.add_argument("--output_path", type=str, default="fed_multimodal/Local/results/temporal_adaptive_features/poison.pt")
     parser.add_argument("--num_samples", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--target_strategy", type=str, default="balanced", choices=["balanced", "fixed", "mixed"])
@@ -48,7 +53,7 @@ def build_labels(args, config):
 def main():
     args = parse_args()
     checkpoint = torch.load(args.checkpoint, map_location=args.device)
-    config = PoisonGANConfig.from_dict(checkpoint["config"])
+    config = TemporalAdaptiveGANConfig.from_dict(checkpoint["config"])
     disc_model, _ = build_kplus1_discriminator(
         args.model_path,
         num_classes=config.num_classes,
@@ -57,7 +62,8 @@ def main():
         freeze=config.freeze_d,
         device=args.device,
     )
-    generator = PoisonFeatureGenerator(
+    discriminator = PoisonDiscriminator(disc_model)
+    generator = TemporalAdaptivePoisonGenerator(
         num_classes=config.num_classes,
         audio_seq_len=config.audio_seq_len,
         audio_feat_dim=config.audio_feat_dim,
@@ -66,11 +72,13 @@ def main():
         z_dim=config.z_dim,
         label_emb_dim=config.label_emb_dim,
         hidden_dim=config.hidden_dim,
-        audio_out_max=config.audio_out_max,
         video_out_max=config.video_out_max,
         video_scale_max=config.video_scale_max,
+        frame_noise_dim=config.frame_noise_dim,
+        temporal_groups_max=config.temporal_groups_max,
+        audio_stats_momentum=config.audio_stats_momentum,
     )
-    trainer = FedPoisonGANTrainer(generator, PoisonDiscriminator(disc_model), config, device=args.device)
+    trainer = TemporalAdaptiveGANTrainer(generator, discriminator, config, device=args.device)
     trainer.load_checkpoint(args.checkpoint, load_optimizers=False)
     condition, train_label = build_labels(args, config)
     data = trainer.generate(args.num_samples, condition, batch_size=args.batch_size, train_labels=train_label)

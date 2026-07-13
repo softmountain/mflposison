@@ -27,6 +27,7 @@ fed_multimodal/
 ├── features/         数据划分 / 缺失模态模拟 / 特征提取三步管线
 ├── generator/        【一代】增强/蒸馏 GAN
 ├── poison_gan/       【二代】K+1 投毒 GAN 核心
+|-- temporal_adaptive_gan/  Independent temporal-adaptive poison GAN
 └── Local/            两代的本地训练/评估/生成入口脚本
 ```
 
@@ -87,9 +88,19 @@ fed_multimodal/Local/results/local_training/best_model.pt           # K 类 teac
 
 - **生成器 `PoisonFeatureGenerator`**：`z(256) + label_emb(128)` → 共享 trunk → 两个 **FiLM 块**（label 控类别、z 控类内变化，解耦以缓解 mode collapse）→ 音频支（ConvTranspose 上采样 + per-sample z-norm）/ 视频支（MLP + ReLU 非负 + clamp）。
 - **`legacy`** keeps the original `PoisonFeatureGenerator` and remains compatible with existing checkpoints.
-- **`temporal_adaptive` - `TemporalAdaptivePoisonGenerator`** uses running real-audio calibration without per-sample z-normalization, plus per-frame noise, temporal convolution, and class-specific video scale/bias. Its preset also enables a 1:3 D/G schedule, decaying instance noise, lazy R1, audio moment matching, and diversity warm-up.
+- **`temporal_adaptive` - `fed_multimodal/temporal_adaptive_gan/`** is now a physically separate package with its own config, model, losses, and trainer. It uses running real-audio calibration, per-frame noise, temporal convolution, class-specific video scale/bias, a 1:3 D/G schedule, decaying instance noise, lazy R1, audio moment matching, and diversity warm-up.
 - **判别器（K+1）**：把 K 类分类器扩成 K+1 类，第 K 类代表 fake/poison 类；骨干与前 K 行分类头从 teacher 迁移，fake 类行用 teacher 权重均值初始化。
 - **损失**：判别器 `CE(real) + λ·CE(fake→K)`；生成器 = target CE + avoid（压低 fake 类）+ feature matching + variance matching + mode-seeking diversity + 统计对齐（多样性项带 warmup）。**Memory Bank** 用动量维护类原型，解决 batch 内缺类问题。
+
+### Independent `temporal_adaptive` variant
+
+```bash
+python fed_multimodal/Local/train_temporal_adaptive_gan.py --epochs 50
+python fed_multimodal/Local/eval_temporal_adaptive_gan.py --checkpoint path/to/checkpoint.pt
+python fed_multimodal/Local/generate_temporal_adaptive_features.py --checkpoint path/to/checkpoint.pt
+```
+
+Its implementation and entry points are separate from `poison_gan`; see `fed_multimodal/temporal_adaptive_gan/README.md`.
 
 ### 1. Smoke test
 
@@ -104,7 +115,6 @@ bash fed_multimodal/Local/run_poison_gan_cloud.sh
 # 或手动：
 python fed_multimodal/Local/train_poison_gan.py \
   --model_path fed_multimodal/Local/results/local_training/best_model.pt \
-  --gan_variant temporal_adaptive \
   --epochs 50 --batch_size 32 --num_workers 4 \
   --save_interval 10 --target_strategy same_as_real \
   --freeze_d backbone --exp_name cloud
