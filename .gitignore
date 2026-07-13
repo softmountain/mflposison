@@ -53,3 +53,9 @@ tmp/
 .DS_Store
 *.swp
 *.swo
+
+# ===== Claude Code 辅助文件（不上传） =====
+.claude/
+CLAUDE.md
+**/.claude/
+**/CLAUDE.md
