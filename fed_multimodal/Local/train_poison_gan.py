@@ -8,7 +8,12 @@ import numpy as np
 import torch
 
 from fed_multimodal.Local.dataloader import UCF101LocalDataManager
-from fed_multimodal.poison_gan import PoisonDiscriminator, PoisonFeatureGenerator, PoisonGANConfig, FedPoisonGANTrainer
+from fed_multimodal.poison_gan import (
+    FedPoisonGANTrainer,
+    PoisonDiscriminator,
+    PoisonGANConfig,
+    build_poison_generator,
+)
 from fed_multimodal.poison_gan.kplus1 import build_kplus1_discriminator
 
 
@@ -19,6 +24,8 @@ def parse_args():
     parser.add_argument("--dataset_dir", type=str, default="fed_multimodal/datasets/ucf101")
     parser.add_argument("--output_dir", type=str, default="fed_multimodal/Local/results/poison_gan")
     parser.add_argument("--exp_name", type=str, default="default")
+    parser.add_argument("--gan_variant", type=str, default="temporal_adaptive", choices=PoisonGANConfig.VARIANTS)
+    parser.add_argument("--prototype_bank", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=4)
@@ -30,8 +37,8 @@ def parse_args():
     parser.add_argument("--att_name", type=str, default="")
     parser.add_argument("--z_dim", type=int, default=256)
     parser.add_argument("--hidden_dim", type=int, default=512)
-    parser.add_argument("--lr_g", type=float, default=2e-4)
-    parser.add_argument("--lr_d", type=float, default=1e-4)
+    parser.add_argument("--lr_g", type=float, default=None)
+    parser.add_argument("--lr_d", type=float, default=None)
     parser.add_argument("--lambda_d_fake", type=float, default=None)
     parser.add_argument("--lambda_avoid", type=float, default=None)
     parser.add_argument("--lambda_div", type=float, default=None)
@@ -57,7 +64,8 @@ def main():
     )
     loaders = dm.get_dataloaders()
 
-    config = PoisonGANConfig(
+    config = PoisonGANConfig.for_variant(
+        args.gan_variant,
         num_classes=dm.num_classes,
         fake_class=dm.num_classes,
         audio_seq_len=dm.audio_seq_len,
@@ -92,20 +100,10 @@ def main():
         device=args.device,
     )
     discriminator = PoisonDiscriminator(discriminator_model)
-    generator = PoisonFeatureGenerator(
-        num_classes=config.num_classes,
-        audio_seq_len=config.audio_seq_len,
-        audio_feat_dim=config.audio_feat_dim,
-        video_seq_len=config.video_seq_len,
-        video_feat_dim=config.video_feat_dim,
-        z_dim=config.z_dim,
-        label_emb_dim=config.label_emb_dim,
-        hidden_dim=config.hidden_dim,
-        audio_out_max=config.audio_out_max,
-        video_out_max=config.video_out_max,
-        video_scale_max=config.video_scale_max,
-    )
+    generator = build_poison_generator(config)
     trainer = FedPoisonGANTrainer(generator, discriminator, config, loaders["full_train"], args.device)
+    if args.prototype_bank:
+        trainer.load_prototypes(args.prototype_bank)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

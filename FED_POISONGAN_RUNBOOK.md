@@ -70,6 +70,7 @@ bash fed_multimodal/Local/run_poison_gan_cloud.sh
 ```bash
 python fed_multimodal/Local/train_poison_gan.py \
   --model_path fed_multimodal/Local/results/local_training/best_model.pt \
+  --gan_variant temporal_adaptive \
   --epochs 50 \
   --batch_size 32 \
   --num_workers 4 \

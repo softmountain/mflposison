@@ -86,6 +86,8 @@ fed_multimodal/Local/results/local_training/best_model.pt           # K 类 teac
 ### 组成结构
 
 - **生成器 `PoisonFeatureGenerator`**：`z(256) + label_emb(128)` → 共享 trunk → 两个 **FiLM 块**（label 控类别、z 控类内变化，解耦以缓解 mode collapse）→ 音频支（ConvTranspose 上采样 + per-sample z-norm）/ 视频支（MLP + ReLU 非负 + clamp）。
+- **`legacy`** keeps the original `PoisonFeatureGenerator` and remains compatible with existing checkpoints.
+- **`temporal_adaptive` - `TemporalAdaptivePoisonGenerator`** uses running real-audio calibration without per-sample z-normalization, plus per-frame noise, temporal convolution, and class-specific video scale/bias. Its preset also enables a 1:3 D/G schedule, decaying instance noise, lazy R1, audio moment matching, and diversity warm-up.
 - **判别器（K+1）**：把 K 类分类器扩成 K+1 类，第 K 类代表 fake/poison 类；骨干与前 K 行分类头从 teacher 迁移，fake 类行用 teacher 权重均值初始化。
 - **损失**：判别器 `CE(real) + λ·CE(fake→K)`；生成器 = target CE + avoid（压低 fake 类）+ feature matching + variance matching + mode-seeking diversity + 统计对齐（多样性项带 warmup）。**Memory Bank** 用动量维护类原型，解决 batch 内缺类问题。
 
@@ -102,6 +104,7 @@ bash fed_multimodal/Local/run_poison_gan_cloud.sh
 # 或手动：
 python fed_multimodal/Local/train_poison_gan.py \
   --model_path fed_multimodal/Local/results/local_training/best_model.pt \
+  --gan_variant temporal_adaptive \
   --epochs 50 --batch_size 32 --num_workers 4 \
   --save_interval 10 --target_strategy same_as_real \
   --freeze_d backbone --exp_name cloud

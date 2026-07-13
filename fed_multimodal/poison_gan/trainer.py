@@ -3,7 +3,7 @@ from pathlib import Path
 import torch
 
 from .kplus1 import trainable_parameters
-from .losses import discriminator_loss, generator_loss
+from .losses import discriminator_loss, generator_loss, r1_gradient_penalty
 from .memory_bank import ClassEmbeddingBank
 from .metrics import (
     classification_metrics,
@@ -25,6 +25,7 @@ class FedPoisonGANTrainer:
         self.opt_g = torch.optim.Adam(self.generator.parameters(), lr=config.lr_g, betas=(0.5, 0.999))
         self.opt_d = torch.optim.Adam(trainable_parameters(self.discriminator), lr=config.lr_d, betas=(0.5, 0.999))
         self.bank = ClassEmbeddingBank(config.num_classes, momentum=0.9, device=device)
+        self._d_updates = 0
 
     def sample_targets(self, y_real):
         strategy = self.config.target_strategy
@@ -55,18 +56,88 @@ class FedPoisonGANTrainer:
             y_real.long().to(self.device),
         )
 
-    def train_d_step(self, batch):
+    def _fake_lengths(self, len_a, len_v):
+        if self.config.gan_variant == "legacy":
+            return (
+                torch.full_like(len_a, self.config.audio_seq_len),
+                torch.full_like(len_v, self.config.video_seq_len),
+            )
+        return (
+            len_a.clamp(min=0, max=self.config.audio_seq_len),
+            len_v.clamp(min=0, max=self.config.video_seq_len),
+        )
+
+    def _instance_noise_std(self, epoch):
+        start = float(self.config.instance_noise_std)
+        decay_epochs = max(1, int(self.config.instance_noise_decay_epochs))
+        return start * max(0.0, 1.0 - float(epoch) / float(decay_epochs))
+
+    @staticmethod
+    def _add_instance_noise(x, lengths, std):
+        if std <= 0:
+            return x
+        noisy = x + torch.randn_like(x) * std
+        mask = (
+            torch.arange(x.size(1), device=x.device).unsqueeze(0)
+            < lengths.to(x.device).unsqueeze(1)
+        )
+        while mask.dim() < x.dim():
+            mask = mask.unsqueeze(-1)
+        return noisy * mask.to(dtype=noisy.dtype)
+
+    def load_prototypes(self, path_or_state):
+        """Seed the local class bank from a server-broadcast prototype state."""
+        state = path_or_state
+        if isinstance(path_or_state, (str, Path)):
+            state = torch.load(path_or_state, map_location=self.device)
+        if "embedding_bank" in state:
+            state = state["embedding_bank"]
+        self.bank.load_state_dict(state)
+
+    def export_prototypes(self):
+        state = self.bank.state_dict()
+        return {
+            key: value.detach().cpu() if torch.is_tensor(value) else value
+            for key, value in state.items()
+        }
+
+    def train_d_step(self, batch, epoch=0):
         real_audio, real_video, len_a, len_v, y_real = self._move_batch(batch)
         y_target = self.sample_targets(y_real)
         z = torch.randn(y_real.size(0), self.config.z_dim, device=self.device)
-        fake_len_a = torch.full_like(len_a, self.config.audio_seq_len)
-        fake_len_v = torch.full_like(len_v, self.config.video_seq_len)
+        fake_len_a, fake_len_v = self._fake_lengths(len_a, len_v)
+        if hasattr(self.generator, "update_real_stats"):
+            self.generator.update_real_stats(real_audio, len_a)
         with torch.no_grad():
             fake_audio, fake_video = self.generator(z, y_target, fake_len_a, fake_len_v)
 
+        noise_std = self._instance_noise_std(epoch)
+        real_audio_d = self._add_instance_noise(real_audio, len_a, noise_std)
+        real_video_d = self._add_instance_noise(real_video, len_v, noise_std)
+        fake_audio_d = self._add_instance_noise(fake_audio.detach(), fake_len_a, noise_std)
+        fake_video_d = self._add_instance_noise(fake_video.detach(), fake_len_v, noise_std)
+        use_r1 = (
+            self.config.r1_gamma > 0
+            and self._d_updates % self.config.r1_interval == 0
+        )
+        if use_r1:
+            real_audio_d = real_audio_d.detach().requires_grad_(True)
+            real_video_d = real_video_d.detach().requires_grad_(True)
+
         self.opt_d.zero_grad(set_to_none=True)
-        logits_real, emb_real = self.discriminator(real_audio, real_video, len_a, len_v, return_embed=True)
-        logits_fake = self.discriminator(fake_audio.detach(), fake_video.detach(), fake_len_a, fake_len_v)
+        logits_real, emb_real = self.discriminator(
+            real_audio_d,
+            real_video_d,
+            len_a,
+            len_v,
+            return_embed=True,
+        )
+        logits_fake = self.discriminator(
+            fake_audio_d,
+            fake_video_d,
+            fake_len_a,
+            fake_len_v,
+        )
         loss, metrics = discriminator_loss(
             logits_real,
             y_real,
@@ -74,8 +145,21 @@ class FedPoisonGANTrainer:
             self.config.fake_class,
             self.config.lambda_d_fake,
         )
+        loss_r1 = loss.new_tensor(0.0)
+        if use_r1:
+            loss_r1 = r1_gradient_penalty(
+                logits_real,
+                y_real,
+                [real_audio_d, real_video_d],
+                [len_a, len_v],
+                gamma=self.config.r1_gamma,
+            )
+            loss = loss + loss_r1
+        metrics["d_r1"] = float(loss_r1.detach().cpu())
+        metrics["instance_noise_std"] = float(noise_std)
         loss.backward()
         self.opt_d.step()
+        self._d_updates += 1
         self.bank.update(emb_real.detach(), y_real.detach())
         return metrics
 
@@ -83,8 +167,7 @@ class FedPoisonGANTrainer:
         real_audio, real_video, len_a, len_v, y_real = self._move_batch(batch)
         y_target = self.sample_targets(y_real)
         z = torch.randn(y_real.size(0), self.config.z_dim, device=self.device)
-        fake_len_a = torch.full_like(len_a, self.config.audio_seq_len)
-        fake_len_v = torch.full_like(len_v, self.config.video_seq_len)
+        fake_len_a, fake_len_v = self._fake_lengths(len_a, len_v)
 
         self.opt_g.zero_grad(set_to_none=True)
         fake_audio, fake_video = self.generator(z, y_target, fake_len_a, fake_len_v)
@@ -103,8 +186,8 @@ class FedPoisonGANTrainer:
             bank=self.bank,
             generator=self.generator,
             z=z,
-            len_a=len_a,
-            len_v=len_v,
+            len_a=fake_len_a,
+            len_v=fake_len_v,
             fake_audio=fake_audio,
             fake_video=fake_video,
             real_audio=real_audio,
@@ -123,7 +206,7 @@ class FedPoisonGANTrainer:
             if max_batches is not None and batch_idx > max_batches:
                 break
             for _ in range(self.config.d_steps):
-                d_metrics = self.train_d_step(batch)
+                d_metrics = self.train_d_step(batch, epoch=epoch)
             for _ in range(self.config.g_steps):
                 g_metrics = self.train_g_step(batch, epoch=epoch)
             metrics = {**d_metrics, **g_metrics}
@@ -144,8 +227,7 @@ class FedPoisonGANTrainer:
             real_audio, real_video, len_a, len_v, y_real = self._move_batch(batch)
             y_target = self.sample_targets(y_real)
             z = torch.randn(y_real.size(0), self.config.z_dim, device=self.device)
-            fake_len_a = torch.full_like(len_a, self.config.audio_seq_len)
-            fake_len_v = torch.full_like(len_v, self.config.video_seq_len)
+            fake_len_a, fake_len_v = self._fake_lengths(len_a, len_v)
             fake_audio, fake_video = self.generator(z, y_target, fake_len_a, fake_len_v)
             logits_fake, emb_fake = self.discriminator(fake_audio, fake_video, fake_len_a, fake_len_v, return_embed=True)
             _, emb_real = self.discriminator(real_audio, real_video, len_a, len_v, return_embed=True)

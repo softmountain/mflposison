@@ -4,7 +4,12 @@ from pathlib import Path
 
 import torch
 
-from fed_multimodal.poison_gan import PoisonDiscriminator, PoisonFeatureGenerator, PoisonGANConfig, FedPoisonGANTrainer
+from fed_multimodal.poison_gan import (
+    FedPoisonGANTrainer,
+    PoisonDiscriminator,
+    PoisonGANConfig,
+    build_poison_generator,
+)
 from fed_multimodal.poison_gan.kplus1 import build_kplus1_discriminator
 
 
@@ -57,19 +62,7 @@ def main():
         freeze=config.freeze_d,
         device=args.device,
     )
-    generator = PoisonFeatureGenerator(
-        num_classes=config.num_classes,
-        audio_seq_len=config.audio_seq_len,
-        audio_feat_dim=config.audio_feat_dim,
-        video_seq_len=config.video_seq_len,
-        video_feat_dim=config.video_feat_dim,
-        z_dim=config.z_dim,
-        label_emb_dim=config.label_emb_dim,
-        hidden_dim=config.hidden_dim,
-        audio_out_max=config.audio_out_max,
-        video_out_max=config.video_out_max,
-        video_scale_max=config.video_scale_max,
-    )
+    generator = build_poison_generator(config)
     trainer = FedPoisonGANTrainer(generator, PoisonDiscriminator(disc_model), config, device=args.device)
     trainer.load_checkpoint(args.checkpoint, load_optimizers=False)
     condition, train_label = build_labels(args, config)
