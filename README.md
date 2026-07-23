@@ -13,7 +13,7 @@
 | **一代** | `fed_multimodal/generator/` | 数据增强 / 知识蒸馏 | `MultimodalFeatureGAN`：双单模态判别器 + Joint Critic + 冻结 teacher（ACGAN 风格） |
 | **二代** | `fed_multimodal/poison_gan/` | 投毒攻击（clean-label / label-flip） | `Fed-PoisonGAN-K+1`：K+1 判别器 + FiLM 生成器 + Memory Bank |
 
-二代是为修复一代暴露的问题（类内多样性不足 / mode collapse）而重写的，`fed_multimodal/Local/GAN_ANALYSIS_REPORT.md` 记录了这一动机。两代目前均针对 **UCF101**（音频 MFCC `[500,80]` + 视频 MobileNetV2 `[9,1280]`，51 类）。
+二代用于改善一代的类内多样性与 mode collapse 问题。当前生产架构、模块边界和兼容策略见 [`REFACTORING.md`](REFACTORING.md)。两代目前均针对 **UCF101**（音频 MFCC `[500,80]` + 视频 MobileNetV2 `[9,1280]`，51 类）。
 
 ## 目录结构
 
@@ -80,9 +80,20 @@ fed_multimodal/Local/results/local_training/best_model.pt           # K 类 teac
 
 ---
 
-## 二代：Fed-PoisonGAN（K+1 投毒）
+## 统一联邦攻防入口
 
-推荐的主线工作流，详见 `FED_POISONGAN_RUNBOOK.md`。
+生产主线使用严格八段场景配置运行 clean pretrain、M* 选择、客户端独立生成器、攻击、服务器检测与防御：
+
+```bash
+python -m mflpoison.runner \
+  --config configs/scenarios/ucf101_generative_poison_defense.yaml
+```
+
+默认结果写入 `artifacts/ucf101_generative_poison_defense/`。`summary.json` 保存最终指标，`round_records/` 保存逐轮检测与聚合审计，`snapshots/` 和 `generator_checkpoints/` 保存模型产物。可通过 `--artifact-root` 覆盖输出目录。
+
+## 二代旧版：Fed-PoisonGAN（K+1 投毒）
+
+以下脚本保留用于加载和评估旧 checkpoint；新的联邦攻击训练应使用上面的统一入口。
 
 ### 组成结构
 
